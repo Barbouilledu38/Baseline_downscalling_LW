@@ -1,7 +1,7 @@
-::: center
-\
-**Downscalling downwelling irradiance in complexe terrain**\
-:::
+
+
+# Downscalling downwelling irradiance in complexe terrain
+
 
 The following code aim to **downscall solar and thermal irrandiance in
 complexe terrain** (i.e. mountains). It is seperated in three parts, as
