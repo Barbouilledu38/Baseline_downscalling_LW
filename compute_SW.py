@@ -2,7 +2,14 @@
 
 ############################################# Imports #########################################
 
-from utils import *
+import xarray as xr
+import numpy as np
+import numba as nb
+from pathlib import Path
+import sys
+import time
+import rioxarray
+from rasterio.enums import Resampling
 
 ############################################# SW #########################################
 
@@ -11,14 +18,16 @@ def Baseline_SW(
     fic_forcing : str = "forcing.nc",
     fic_topo_params : str = "topo_params.nc",
     fic_shadow : str = "shadow.nc",
-    fic_SW_downscalled : str = "SW_downscalled.nc",
+    fic_SW_downscalled : str = "ds_SW.nc",
+    date_input : str = "2026010100",
     x_dim_AROME = "longitude",
     y_dim_AROME = "latitude"):
     
     """
-    Based on a spatial and temporal extent, select inside de shadow netcdf the SW projection
-    map and multiply it by the SW forcing interpolated on the same grid. The projection grid 
-    for diffus radiation is the Sky View Factor
+    Multiply the SW forcing interpolated on the topographic parameters grid by the shadow_mask variable of the fic_shadow netcdf
+    of the corresponding time. The projection grid for diffus radiation is the Sky View Factor. 
+    
+    The shadow mask file must contain only a date in the time coordinate in order to parallelize on the time coordinate.
     
     [Input]
     - run_dir : str = adresse of the run_dir
@@ -30,7 +39,7 @@ def Baseline_SW(
     
     [Output]
     - Save the downscalled SW forçing in a netcdf, indexed on the topo_params x and y coordinates 
-            (Lambdert 93, i.e. epsg 2154)with variables SWdir and SWdif
+            (Lambdert 93, i.e. epsg 2154) with variables SWdir and SWdif
     """
     
     run_dir = Path(run_dir)
@@ -48,57 +57,32 @@ def Baseline_SW(
     except FileNotFoundError as e:
         raise FileNotFoundError(f"Fichier manquant dans le répertoire de run : {e}") from e
         
-    # Opening meteorological forçing file
+    # Loading forcing file in epsg 4326, topographic parameters file in epsg 2154
+    ds_forcing = xr.open_dataset(fic_forcing)
+    ds_topo = xr.open_dataset(fic_topo_params)
     
-    ds_forcage = xr.open_dataset(fic_forcing)   
+    # Changing the coordinates to epsg 2154, the epsg of the goal DEM
+    ## Writing crs for the projection
+    ds_forcing = ds_forcing.rio.write_crs("EPSG:4326")
+    ds_topo = ds_topo.rio.write_crs("EPSG:2154")
     
-    xx,yy = np.meshgrid(ds_forcage[x_dim_AROME].values,ds_forcage[y_dim_AROME].values)
-    xs_, ys_ = convert_epsg_pts(xx,yy, epsg_src =4326, epsg_tgt=2154)
-    xs_AROME, ys_AROME = xs_[0],ys_[:,0]
-    
-    xmin = min(xs_AROME)
-    xmax = max(xs_AROME)
-    ymin = min(ys_AROME)
-    ymax = max(ys_AROME)
-    
-    print("Forcing file OK")
-                
-    # Opening topo params
-
-    ds_topo_params = xr.open_dataset(fic_topo_params)
-    
-    print("Topographique params crop OK")
-        
-    # Opening shadow netcdf
+    # Projecting/interpolating the coarse AROME on the fine DEM with rio.reproject_match
+    # and bilinear option. Now calculation may be made easily
+    ds_forcing = ds_forcing.rio.reproject_match(ds_topo,
+                                                resampling=Resampling.bilinear)
+                                                
+    # Loading the shadow mask netcdf
     ds_shadow = xr.open_dataset(fic_shadow)
-            
-    # Les points pour les interpolations
-    xx,yy = np.meshgrid(ds_topo.x.values,ds_topo.y.values)
-    nx,ny = xx.shape
-    points = np.column_stack((np.ravel(xx),np.ravel(yy)))
     
-    ################## Calcul ###########################
-    SW_fine = np.zeros((nx,ny,2))
-        
-    # dir : Interpolated points multiplicated by the shadow mask
-    SW_fine[:,:,0] = interpolate( 
-        xs = xs,
-        ys = ys,
-        arr = ds_forcage.SWdir.values, #.astype(np.float64),
-        points = points).reshape(nx, ny)*ds_shadow_t.shadow_mask.values
-        
-    # dif : Interpolated points multiplicated by the sky view factor
-    SW_fine[:,:,1] = interpolate( 
-        xs = xs,
-        ys = ys,
-        arr = ds_forcage_t.SWdif.values, #.astype(np.float64),
-        points = points).reshape(nx, ny)*ds_topo.svf.values
-        
-    # Sauvegarde sous .nc
+    # Selecting the date for the shadow mask 
+    mm,dd,hh = date_input[4:6],date_input[6:8],date_input[8:10]
+    ds_shadow_t = ds_shadow.sel(time=f"2026-{mm}-{dd}T{hh}:00:00.000000000", method = 'nearest')
+                                               
+    # save the result inside a netcdf        
     ds_SW = xr.Dataset(
         data_vars=dict(
-            SWdir=(["time","y", "x"], SW_fine[:,:,0]),
-            SWdif=(["time","y", "x"], SW_fine[:,:,1])
+            SWdir=(["y", "x"], ds_forcing.DIR_SWdown.values*ds_shadow_t.shadow_mask.values),
+            SWdif=(["y", "x"], ds_forcing.SCA_SWdown.values*ds_topo.svf.values)
         ),
         coords=dict(
             x=("x", ds_topo.x.values),
@@ -109,27 +93,32 @@ def Baseline_SW(
     ds_SW.SWdir.attrs={'units': '$W.m^{-2}$', 'standard_name': 'SWdir', 'long_name': 'Direct downwelling shortwave'}
     ds_SW.SWdif.attrs={'units': '$W.m^{-2}$', 'standard_name': 'SWdif', 'long_name': 'Diffuse downwelling shortwave'}
     
-    ds_SW.to_netcdf(fic_res)
-    
+    ds_SW.to_netcdf(fic_SW_downscalled)
+                                                
     print("SW OK")
     
 ############################################# Calling function #########################################
 
-if len(sys.argv) != 4:
-    print("Usage: python3 compute_SW.py run_dir forcing.nc nom_experience")
+if len(sys.argv) != 5:
+    print("Usage: python3 compute_SW.py run_dir forcing.nc nom_experience dateinput")
     sys.exit(1)
+    
+start_time = time.time()
     
 # Computing SW
 Baseline_SW(
     run_dir = sys.argv[1],
     fic_forcing = sys.argv[2],
     fic_topo_params = f"topo_params_{sys.argv[3]}.nc",
-    fic_shadow : f"shadow_mask_{sys.argv[3]}.nc",
-    fic_SW_downscalled : str = f"SW_{sys.argv[3]}.nc",
+    fic_shadow = f"shadow_mask_{sys.argv[3]}.nc",
+    fic_SW_downscalled = f"SW_{sys.argv[3]}.nc",
+    date_input = sys.argv[4],
     x_dim_AROME = "longitude",
     y_dim_AROME = "latitude")
 
+end_time = time.time()
 
+print(f"Computing SW downscalling : {round(end_time - start_time,3)} s")
 
 
 

@@ -5,7 +5,6 @@ import numpy as np
 import pandas as pd
 from pyproj import Transformer
 import numba as nb
-
 from pathlib import Path
 import sys
 import time
@@ -69,10 +68,20 @@ def baseline_LW(
     run_dir : str = ".") :
 
     path_run_dir = Path(run_dir)
+    fic_topo_params = path_run_dir / topo_params_file
+    fic_forcing = path_run_dir / forcing_file
+    
+    # Error on missing file in working directory
+    
+    try:
+        xr.open_dataset(fic_forcing).close()
+        xr.open_dataset(fic_topo_params).close()
+    except FileNotFoundError as e:
+        raise FileNotFoundError(f"Fichier manquant dans le répertoire de run : {e}") from e
 
     # Loading forcing file in epsg 4326, topographic parameters file in epsg 2154
-    ds_forçage = xr.open_dataset(path_run_dir / forcing_file)
-    ds_topo = xr.open_dataset(path_run_dir / topo_params_file)
+    ds_forçage = xr.open_dataset(fic_forcing)
+    ds_topo = xr.open_dataset(fic_topo_params)
     
     # Creating a new variable eps_a in forcage xr.Dataset before reggridding
     ds_forçage["eps_a"] = (["latitude","longitude"], ds_forçage.LWdown.values/(sigma*ds_forçage.Tair.values**4))

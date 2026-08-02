@@ -12,6 +12,9 @@ Le caclcul des angles d'horizon peut être utilisé pour retourer le SVF plutôt
 
 from utils import *
 
+import rioxarray
+from rasterio.enums import Resampling
+
 from topocalc import gradient
 from topocalc import viewf
 from topocalc import horizon
@@ -30,14 +33,15 @@ def compute_svf_regular_grid(
     Compute SVF for the whole .nc topography in input
     """
     
+    print("Computing Sky View Factor")
+    
     start = time.time()
     
     path_run_dir = Path(run_dir)
         
     ds_topo = xr.open_dataset(path_run_dir / fic_topo)
         
-    # La projection Lambert 93 (ou epsg 2154) est en mètre donc conforme pour le calcul, pas besoin de changer en 32632
-    #xs, ys = convert_epsg_pts(ds_topo.x.values,ds_topo.x.values, epsg_src = epsg_init, epsg_tgt=32632)
+    # La projection Lambert 93 (ou epsg 2154) est en mètre donc conforme pour le calcul de topocalc
     dx = np.median(np.diff(ds_topo.x.values))
     dy = np.median(np.diff(ds_topo.y.values))
 
@@ -87,6 +91,7 @@ def from_dates_to_solar_angles(
     
     path_run_dir = Path(run_dir)
     
+    # Loading topographic parameters file in epsg 2154
     ds_topo = xr.open_dataset(path_run_dir / fic_dem)
     
     xx,yy = np.meshgrid(ds_topo.x.values,ds_topo.y.values) # attention shape ny,nx
@@ -109,7 +114,7 @@ def from_dates_to_solar_angles(
         
         # Utilisation de 'elevation' et pas 'apparent_elevation' (prenant en plus en compte
         # la réfraction atmosphérique, surtout utile pour la levée/le coucher de soleil) pour des
-        # calculs purement géométrique
+        # calculs purement géométrique, ici donc 'apparent_...'
         solar = pvlib.solarposition.get_solarposition(
             latitude  = lats.ravel(),   # tableau 1D de tous les pixels
             longitude = lons.ravel(),
@@ -145,12 +150,11 @@ def proj(
     elevation : float,
     )-> float :
     
-    # Function ...
     # Tout les angles en input sont en degrés, prendre l'angle solaire zénithal à la place de l'élévation
     # Donc le pi/2-elevation = zénithal
     fact = np.cos(np.pi/2-np.deg2rad(elevation))*np.cos(np.deg2rad(slope)) + np.sin(np.pi/2-np.deg2rad(elevation))*np.sin(np.deg2rad(slope))*np.cos(np.deg2rad(azimuth) - np.deg2rad(aspect))
     
-    
+    # A l'ombre de sa propre pente
     if fact < 0 :
         return 0
     else :    
@@ -295,12 +299,7 @@ def shadow_dataset(
     # Load topographic params with variables ZS,slope,aspect,svf
     ds_topo = xr.open_dataset(path_run_dir / fic_topo_params)
     
-    dx = np.median(np.diff(ds_topo.x.values)) 
-    xx, yy = np.meshgrid(ds_topo.x.values,ds_topo.y.values) # shape (ny, nx)
-    
-    # Changement systeme de coordonnées de Lambert 93 (epsg 2154) à epsg 4326 pour from_dates_to_solar_angles
-    # Fonction de changment de coordonnées issue de TopoPyScale : https://github.com/ArcticSnow/TopoPyScale
-    lons,lats = convert_epsg_pts(xx,yy, epsg_src=2154, epsg_tgt=4326)
+    dx = np.median(np.diff(ds_topo.x.values))
 
     # Compute solar elevation and azimuths for all the year 2026 on all the DEM
     ds_solar = from_dates_to_solar_angles(
