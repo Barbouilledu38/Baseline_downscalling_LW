@@ -10,14 +10,19 @@ Le caclcul des angles d'horizon peut être utilisé pour retourer le SVF plutôt
 
 ############################################# Imports #########################################
 
-from utils import *
-
+import argparse
+import numpy as np
+import numba as nb
+import pandas as pd
 import rioxarray
+import os
 from rasterio.enums import Resampling
+import xarray as xr
 
 from topocalc import gradient
 from topocalc import viewf
 from topocalc import horizon
+from snowtools.utils.projections import LCCProjectionType
 
 import pvlib
 
@@ -37,9 +42,9 @@ def compute_svf_regular_grid(
     
     start = time.time()
     
-    path_run_dir = Path(run_dir)
+    path_run_dir = os.path.join(run_dir)
         
-    ds_topo = xr.open_dataset(path_run_dir / fic_topo)
+    ds_topo = xr.open_dataset(os.path.join(path_run_dir, fic_topo))
         
     # La projection Lambert 93 (ou epsg 2154) est en mètre donc conforme pour le calcul de topocalc
     dx = np.median(np.diff(ds_topo.x.values))
@@ -69,7 +74,7 @@ def compute_svf_regular_grid(
     ds_topo_params.aspect.attrs = {'units': 'rad'}
     ds_topo_params.svf.attrs = {'units': 'ratio', 'standard_name': 'svf', 'long_name': 'Sky view factor'}
     
-    ds_topo_params.to_netcdf(path_run_dir / save_name)
+    ds_topo_params.to_netcdf(os.path.join(path_run_dir, save_name))
     
     end = time.time()
     
@@ -89,13 +94,15 @@ def from_dates_to_solar_angles(
     during the input time_slice.
     """
     
-    path_run_dir = Path(run_dir)
+    path_run_dir = os.path.join(run_dir)
     
     # Loading topographic parameters file in epsg 2154
-    ds_topo = xr.open_dataset(path_run_dir / fic_dem)
+    ds_topo = xr.open_dataset(os.path.join(path_run_dir, fic_dem))
     
-    xx,yy = np.meshgrid(ds_topo.x.values,ds_topo.y.values) # attention shape ny,nx
-    lons,lats = convert_epsg_pts(xx,yy, epsg_src=2154, epsg_tgt=4326)
+    # xx,yy = np.meshgrid(ds_topo.x.values,ds_topo.y.values) # attention shape ny,nx
+    lcc = LCCProjectionType(ds_topo.x.values, ds_topo.y.values)
+    #lons,lats = convert_epsg_pts(xx,yy, epsg_src=2154, epsg_tgt=4326)
+    lons, lats = lcc.geometry.get_lonlat_grid()
     
     nt = len(time_slice)
     ny,nx = lons.shape
@@ -152,7 +159,8 @@ def proj(
     
     # Tout les angles en input sont en degrés, prendre l'angle solaire zénithal à la place de l'élévation
     # Donc le pi/2-elevation = zénithal
-    fact = np.cos(np.pi/2-np.deg2rad(elevation))*np.cos(np.deg2rad(slope)) + np.sin(np.pi/2-np.deg2rad(elevation))*np.sin(np.deg2rad(slope))*np.cos(np.deg2rad(azimuth) - np.deg2rad(aspect))
+    fact = (np.cos(np.pi/2-np.deg2rad(elevation))*np.cos(np.deg2rad(slope)) +
+            np.sin(np.pi/2-np.deg2rad(elevation))*np.sin(np.deg2rad(slope))*np.cos(np.deg2rad(azimuth) - np.deg2rad(aspect)))
     
     # A l'ombre de sa propre pente
     if fact < 0 :
@@ -282,7 +290,7 @@ def shadow_dataset(
     
     start_time = time.time()
     
-    path_run_dir = Path(run_dir)
+    path_run_dir = os.path.join(run_dir)
     
     ############# Solar parameters ##################
     
@@ -294,10 +302,10 @@ def shadow_dataset(
     slice_t = slice(start, end)
     time_slice = pd.date_range(start, end, freq='h')
     
-    path_run_dir = Path(run_dir)
+    path_run_dir = os.path.join(run_dir)
     
     # Load topographic params with variables ZS,slope,aspect,svf
-    ds_topo = xr.open_dataset(path_run_dir / fic_topo_params)
+    ds_topo = xr.open_dataset(os.path.join(path_run_dir, fic_topo_params))
     
     dx = np.median(np.diff(ds_topo.x.values))
 
@@ -368,7 +376,7 @@ def shadow_dataset(
     )
     ds_shadow.shadow_mask.attrs={'standard_name': 'Topo SWdir proj', 'long_name': 'Topographic SWdir projection factor'}
     
-    ds_shadow.to_netcdf(path_run_dir / fic_shadow)
+    ds_shadow.to_netcdf(os.path.join(path_run_dir, fic_shadow))
     
     end_time = time.time()
     
@@ -376,24 +384,34 @@ def shadow_dataset(
     print(f"Total runtime calculating shadow mask and projection : {round(end_time - start_time,3)} seconds")
     
 ############################################# Calling function #########################################
+if __name__ == "__main__":
+    USAGE = "Usage: python3 compute_permanent_features.py run_dir dem.nc nom_experience"
 
-if len(sys.argv) != 4:
-    print("Usage: python3 compute_permanent_features.py run_dir dem.nc nom_experience")
-    sys.exit(1)
-    
+    PARSER = argparse.ArgumentParser(description="Compute sky view factor and shadow mask")
+    PARSER.add_argument("--dir", action="store", type=str, dest="run_dir",
+                        default=".",
+                        help="Run directory. Inputs are taken from there, outputs are stored there.")
+    PARSER.add_argument("--dem", action="store", type=str, dest="fic_topo",
+                        default="dem.nc",
+                        help="Input digital elevation model file name.")
+    PARSER.add_argument("--exp", action="store", type=str, dest="experiment",
+                        default="",
+                        help="Experiment name used in output file name.")
+    args = PARSER.parse_args()
+
 # Les deux fonctions qui se succèdent ici procèdent en réalité aux même étapes. Une amélioration 
 # notoire consisterait à utiliser le calcul optimisé des angles d'horizon dans tous les azimuths
 # de la fonction viewf de topocalc pour le mask d'ombrage
     
 # Computing svf
-compute_svf_regular_grid(
-    run_dir = sys.argv[1],
-    fic_topo = sys.argv[2],
-    save_name = f"topo_params_{sys.argv[3]}.nc")
-    
+    compute_svf_regular_grid(
+        run_dir = args.run_dir,
+        fic_topo = args.fic_topo,
+        save_name = f"topo_params_{args.experiment}.nc")
+
 # Computing shadow mask
-shadow_dataset(
-    run_dir = sys.argv[1],
-    fic_topo_params = f"topo_params_{sys.argv[3]}.nc",
-    fic_shadow = f"shadow_mask_{sys.argv[3]}.nc")
+    shadow_dataset(
+        run_dir = args.run_dir,
+        fic_topo_params = f"topo_params_{args.experiment}.nc",
+        fic_shadow = f"shadow_mask_{args.experiment}.nc")
     
