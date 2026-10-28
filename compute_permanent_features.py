@@ -14,12 +14,9 @@ import argparse
 import numpy as np
 import numba as nb
 import pandas as pd
-import rioxarray
 import os
-from rasterio.enums import Resampling
 import xarray as xr
 
-from topocalc import gradient
 from topocalc import viewf
 from topocalc import horizon
 from snowtools.utils.projections import LCCProjectionType
@@ -48,32 +45,19 @@ def compute_svf_regular_grid(
         
     # La projection Lambert 93 (ou epsg 2154) est en mètre donc conforme pour le calcul de topocalc
     dx = np.median(np.diff(ds_topo.x.values))
-    dy = np.median(np.diff(ds_topo.y.values))
 
-    svf = viewf.viewf(np.double(ds_topo.ZS.values), dx)[0] # Attention ZS et zs
-    slope, aspect = gradient.gradient_d8(ds_topo.ZS.values, dx, dy)
+    svf, _ = viewf.viewf(np.double(ds_topo.ZS.values), dx,
+                      sin_slope=np.sin(np.deg2rad(ds_topo.slope.values)),
+                         aspect=(np.pi - ds_topo.aspect.values*np.pi/180.))
+    # viewf wants the aspect in rad with 0 to the south, negative values to the West and positive values to the east
     
     # Sauvegarde sous .nc
-    ds_topo_params = xr.Dataset(
-        data_vars=dict(
-            ZS=(["y", "x"], ds_topo.ZS.values.astype(np.float64)),
-            svf=(["y", "x"], svf.astype(np.float64)),
-            slope=(["y", "x"], np.rad2deg(slope.astype(np.float64))),
-            aspect=(["y", "x"], aspect.astype(np.float64)),
-        ),
-        coords=dict(
-            x=("x", ds_topo.x.values),
-            y=("y", ds_topo.y.values),
-        )
-    )
-    
-    ds_topo_params.ZS.attrs={'units': 'm', 'standard_name': 'elevation', 'long_name': 'elevation'}
-    ds_topo_params.x.attrs = {'units': 'm'}
-    ds_topo_params.y.attrs = {'units': 'm'}
-    ds_topo_params.slope.attrs = {'units': 'rad'}
-    ds_topo_params.aspect.attrs = {'units': 'rad'}
-    ds_topo_params.svf.attrs = {'units': 'ratio', 'standard_name': 'svf', 'long_name': 'Sky view factor'}
-    
+    ds_topo_params = ds_topo.copy()
+    ds_topo_params["svf"] = xr.DataArray(svf.astype(np.float64), coords=ds_topo.coords, dims=ds_topo.dims,
+                                         name="svf",
+                                         attrs={'units': 'ratio', 'standard_name': 'svf',
+                                                'long_name': 'Sky view factor', 'grid_mapping': ds_topo.ZS.grid_mapping})
+
     ds_topo_params.to_netcdf(os.path.join(path_run_dir, save_name))
     
     end = time.time()
@@ -401,7 +385,7 @@ if __name__ == "__main__":
 
 # Les deux fonctions qui se succèdent ici procèdent en réalité aux même étapes. Une amélioration 
 # notoire consisterait à utiliser le calcul optimisé des angles d'horizon dans tous les azimuths
-# de la fonction viewf de topocalc pour le mask d'ombrage
+# de la fonction viewf de topocalc pour le mask d'ombrage
     
 # Computing svf
     compute_svf_regular_grid(
@@ -410,8 +394,8 @@ if __name__ == "__main__":
         save_name = f"topo_params_{args.experiment}.nc")
 
 # Computing shadow mask
-    shadow_dataset(
-        run_dir = args.run_dir,
-        fic_topo_params = f"topo_params_{args.experiment}.nc",
-        fic_shadow = f"shadow_mask_{args.experiment}.nc")
+#     shadow_dataset(
+#         run_dir = args.run_dir,
+#         fic_topo_params = f"topo_params_{args.experiment}.nc",
+#         fic_shadow = f"shadow_mask_{args.experiment}.nc")
     
