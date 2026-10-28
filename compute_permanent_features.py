@@ -24,6 +24,7 @@ from snowtools.utils.projections import LCCProjectionType
 import pvlib
 
 import time
+nb.config.THREADING_LAYER="omp"
 ############################################# SVF #########################################
 
 def compute_svf_regular_grid(
@@ -71,6 +72,7 @@ def from_dates_to_solar_angles(
     time_slice,
     run_dir : str,
     fic_dem : str,
+    fic_solar : str,
     ):
     
     """
@@ -78,14 +80,12 @@ def from_dates_to_solar_angles(
     during the input time_slice.
     """
     
-    path_run_dir = os.path.join(run_dir)
+    #path_run_dir = os.path.join(run_dir)
     
     # Loading topographic parameters file in epsg 2154
-    ds_topo = xr.open_dataset(os.path.join(path_run_dir, fic_dem))
-    
-    # xx,yy = np.meshgrid(ds_topo.x.values,ds_topo.y.values) # attention shape ny,nx
+    ds_topo = xr.open_dataset(os.path.join(run_dir, fic_dem))
+
     lcc = LCCProjectionType(ds_topo.x.values, ds_topo.y.values)
-    #lons,lats = convert_epsg_pts(xx,yy, epsg_src=2154, epsg_tgt=4326)
     lons, lats = lcc.geometry.get_lonlat_grid()
     
     nt = len(time_slice)
@@ -94,26 +94,38 @@ def from_dates_to_solar_angles(
     
     # L'appel de pvlib n'est pas vectorisée sur le temps, en effet il suffirait de créer un array
     # avec une dimension temporelle répétant les longitudes/latitudes dans ses autres dimensions 
-    # pvlib n'accepte que des tableaux de même longueur, pas de broadcasting implicite
+    # 5,6pvlib n'accepte que des tableaux de même longueur, pas de broadcasting implicite
     # Ce tableaux serait trop grand pour la mémoire si on considère toutes les Alpes
     # pour une année entière
+    for y in range(ny):
+        for x in range(nx):
+            solar = pvlib.solarposition.get_solarposition(
+                time=time_slice,
+                latitude=lats[y,x],
+                longitude=lons[y,x],
+                altitude=ds_topo.ZS.values[y,x],
+                method="nrel_numba"
+            )
+            solar_pos[:, y, x, 0] = solar["azimuth"].values
+            solar_pos[:, y, x, 1] = solar["elevation"].values
     
-    for t, timestamp in enumerate(time_slice): 
-        
-        # création d’un tableau de dates avec le même forme que lats.ravel()
-        time_array = np.full(lats.ravel().shape, timestamp, dtype='datetime64[ns]')
-        
-        # Utilisation de 'elevation' et pas 'apparent_elevation' (prenant en plus en compte
-        # la réfraction atmosphérique, surtout utile pour la levée/le coucher de soleil) pour des
-        # calculs purement géométrique, ici donc 'apparent_...'
-        solar = pvlib.solarposition.get_solarposition(
-            latitude  = lats.ravel(),   # tableau 1D de tous les pixels
-            longitude = lons.ravel(),
-            time      = time_array,
-            altitude = ds_topo.ZS.values.ravel()
-        )
-        solar_pos[t, :, :, 0] = solar["azimuth"].values.reshape(ny, nx)
-        solar_pos[t, :, :, 1] = solar["elevation"].values.reshape(ny, nx)
+    # for t, timestamp in enumerate(time_slice):
+    #
+    #     # création d’un tableau de dates avec le même forme que lats.ravel()
+    #     time_array = np.full(lats.ravel().shape, timestamp, dtype='datetime64[ns]')
+    #
+    #     # Utilisation de 'elevation' et pas 'apparent_elevation' (prenant en plus en compte
+    #     # la réfraction atmosphérique, surtout utile pour la levée/le coucher de soleil) pour des
+    #     # calculs purement géométrique, ici donc 'apparent_...'
+    #     solar = pvlib.solarposition.get_solarposition(
+    #         time=time_array,
+    #         latitude  = lats.ravel(),   # tableau 1D de tous les pixels
+    #         longitude = lons.ravel(),
+    #         altitude = ds_topo.ZS.values.ravel(),
+    #         method="nrel_numpy"
+    #     )
+    #     solar_pos[t, :, :, 0] = solar["azimuth"].values.reshape(ny, nx)
+    #     solar_pos[t, :, :, 1] = solar["elevation"].values.reshape(ny, nx)
                 
     ds_solar = xr.Dataset(
         data_vars=dict(
@@ -128,6 +140,8 @@ def from_dates_to_solar_angles(
     )
     ds_solar.elevation.attrs={'units': 'degre', 'standard_name': 'elevation', 'long_name': 'solar elevation'}
     ds_solar.azimuth.attrs = {'units': 'degre', 'standard_name': 'azimuth', 'long_name': 'solar azimuth'}
+
+    ds_solar.to_netcdf(os.path.join(run_dir, fic_solar))
     
     return ds_solar
     
@@ -141,7 +155,7 @@ def proj(
     elevation : float,
     )-> float :
     
-    # Tout les angles en input sont en degrés, prendre l'angle solaire zénithal à la place de l'élévation
+    # Tout les angles en input sont en degrés, prendre l'angle solaire zénithal à la place de l'élévation
     # Donc le pi/2-elevation = zénithal
     fact = (np.cos(np.pi/2-np.deg2rad(elevation))*np.cos(np.deg2rad(slope)) +
             np.sin(np.pi/2-np.deg2rad(elevation))*np.sin(np.deg2rad(slope))*np.cos(np.deg2rad(azimuth) - np.deg2rad(aspect)))
@@ -254,6 +268,7 @@ def shadow_tab(
 def shadow_dataset(
     fic_topo_params : str = "topo_params.nc",
     fic_shadow : str = "ds_shadow.nc",
+    fic_solar : str = "ds_solar.nc",
     run_dir: str  = "." ):
     
     """
@@ -267,7 +282,7 @@ def shadow_dataset(
     for all the point of the MNT in 72 azimuthal directions (one every 5 degrees). Using the two 
     latter netcdf, a shadow mask is computed and saved. The value shadow_mask of the shadow_mask 
     netcdf is in [0,1], account for self-shadow (slope angle superior to local elevation angle in
-    the azmiuthal direction), projected shadow (shadding by surrounding topography) and direct beam 
+    the azmiuthal direction), projected shadow (shading by surrounding topography) and direct beam
     local projection 
     
     """
@@ -280,9 +295,9 @@ def shadow_dataset(
     
     print("Computing solar parameters")
     
-    # Constructing a time slice with pandas for all the year 2026
-    start = pd.Timestamp('2026-01-01 00:00:00')
-    end   = pd.Timestamp('2026-01-02 00:00:00') #  '2026-12-31 23:00:00'
+    # Constructing a time slice with pandas for all the (year 2026) rather 2024, because we need a leap year
+    start = pd.Timestamp('2024-01-01 00:00:00')
+    end   = pd.Timestamp('2024-12-31 00:00:00') #  '2026-12-31 23:00:00'
     slice_t = slice(start, end)
     time_slice = pd.date_range(start, end, freq='h')
     
@@ -297,7 +312,8 @@ def shadow_dataset(
     ds_solar = from_dates_to_solar_angles(
         run_dir = run_dir,
         fic_dem = fic_topo_params,
-        time_slice = time_slice)
+        time_slice = time_slice,
+        fic_solar=fic_solar)
         
     # To analyse solar parameters if needed
     # ds_solar.to_netcdf(path_run_dir / "ds_solar.nc")
@@ -388,14 +404,16 @@ if __name__ == "__main__":
 # de la fonction viewf de topocalc pour le mask d'ombrage
     
 # Computing svf
-    compute_svf_regular_grid(
-        run_dir = args.run_dir,
-        fic_topo = args.fic_topo,
-        save_name = f"topo_params_{args.experiment}.nc")
+#     compute_svf_regular_grid(
+#         run_dir = args.run_dir,
+#         fic_topo = args.fic_topo,
+#         save_name = f"topo_params_{args.experiment}.nc")
 
 # Computing shadow mask
-#     shadow_dataset(
-#         run_dir = args.run_dir,
-#         fic_topo_params = f"topo_params_{args.experiment}.nc",
-#         fic_shadow = f"shadow_mask_{args.experiment}.nc")
+    shadow_dataset(
+        run_dir = args.run_dir,
+        #fic_topo_params = f"topo_params_{args.experiment}.nc",
+        fic_topo_params=f"topo_params_GrandesRoussesV2.nc",
+        fic_shadow = f"shadow_mask_{args.experiment}.nc",
+        fic_solar = f"solar_position_{args.experiment}.nc",)
     
